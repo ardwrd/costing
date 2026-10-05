@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   ClayBadge,
   ClayButton,
@@ -38,6 +38,63 @@ const currencyLocale: Record<Currency, string> = {
   EUR: "de-DE",
 };
 
+type CalculatorState = {
+  items: CostItem[];
+  quantity: number;
+  unit: string;
+  sellingPrice: number;
+  targetMargin: number;
+  currency: Currency;
+};
+
+const defaultState: CalculatorState = {
+  items: defaultItems,
+  quantity: 1000,
+  unit: "pcs",
+  sellingPrice: 6500,
+  targetMargin: 30,
+  currency: "IDR",
+};
+
+function readInitialState(): CalculatorState {
+  if (typeof window === "undefined") return defaultState;
+
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return defaultState;
+
+    const data = JSON.parse(raw);
+    const supportedCurrencies: Currency[] = ["IDR", "USD", "SGD", "MYR", "EUR"];
+
+    return {
+      items: Array.isArray(data.items) ? data.items : defaultItems,
+      quantity: typeof data.quantity === "number" ? data.quantity : defaultState.quantity,
+      unit: typeof data.unit === "string" ? data.unit : defaultState.unit,
+      sellingPrice:
+        typeof data.sellingPrice === "number"
+          ? data.sellingPrice
+          : defaultState.sellingPrice,
+      targetMargin:
+        typeof data.targetMargin === "number"
+          ? data.targetMargin
+          : defaultState.targetMargin,
+      currency: supportedCurrencies.includes(data.currency)
+        ? (data.currency as Currency)
+        : defaultState.currency,
+    };
+  } catch {
+    return defaultState;
+  }
+}
+
+function subscribeToHydration() {
+  return () => {};
+}
+
+function useHydrated() {
+  return useSyncExternalStore(subscribeToHydration, () => true, () => false);
+}
+
 function uid() {
   return Math.random().toString(36).slice(2, 9);
 }
@@ -57,34 +114,14 @@ function formatNumber(value: number, maximumFractionDigits = 2) {
 }
 
 export default function Home() {
-  const [items, setItems] = useState<CostItem[]>(defaultItems);
-  const [quantity, setQuantity] = useState(1000);
-  const [unit, setUnit] = useState("pcs");
-  const [sellingPrice, setSellingPrice] = useState(6500);
-  const [targetMargin, setTargetMargin] = useState(30);
-  const [currency, setCurrency] = useState<Currency>("IDR");
-  const [hydrated, setHydrated] = useState(false);
-
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const data = JSON.parse(raw);
-        if (Array.isArray(data.items)) setItems(data.items);
-        if (typeof data.quantity === "number") setQuantity(data.quantity);
-        if (typeof data.unit === "string") setUnit(data.unit);
-        if (typeof data.sellingPrice === "number") setSellingPrice(data.sellingPrice);
-        if (typeof data.targetMargin === "number") setTargetMargin(data.targetMargin);
-        if (["IDR", "USD", "SGD", "MYR", "EUR"].includes(data.currency)) {
-          setCurrency(data.currency);
-        }
-      }
-    } catch {
-      // Ignore malformed local data and keep safe defaults.
-    } finally {
-      setHydrated(true);
-    }
-  }, []);
+  const [initial] = useState<CalculatorState>(readInitialState);
+  const [items, setItems] = useState<CostItem[]>(initial.items);
+  const [quantity, setQuantity] = useState(initial.quantity);
+  const [unit, setUnit] = useState(initial.unit);
+  const [sellingPrice, setSellingPrice] = useState(initial.sellingPrice);
+  const [targetMargin, setTargetMargin] = useState(initial.targetMargin);
+  const [currency, setCurrency] = useState<Currency>(initial.currency);
+  const hydrated = useHydrated();
 
   useEffect(() => {
     if (!hydrated) return;
@@ -157,6 +194,10 @@ export default function Home() {
     setSellingPrice(6500);
     setTargetMargin(30);
     setCurrency("IDR");
+  }
+
+  if (!hydrated) {
+    return <main className="site-shell" aria-hidden="true" />;
   }
 
   return (
