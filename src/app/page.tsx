@@ -1,34 +1,117 @@
 "use client";
 
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import {
-  ClayBadge,
-  ClayButton,
-  ClayCard,
-  ClayInput,
-  ClaySelect,
-} from "@/components/ui/clay";
+import { ClayButton, ClayCard, ClayInput, ClaySelect } from "@/components/ui/clay";
 import { clamp, toNumber } from "@/lib/utils";
 
-type CostKind = "variable" | "fixed";
+type CostBasis = "unit" | "batch" | "fixed";
+type TargetMode = "margin" | "markup";
+type Currency = "IDR" | "USD" | "SGD" | "MYR" | "EUR";
+type TemplateKey = "product" | "fnb" | "service" | "reseller" | "project" | "custom";
 
 type CostItem = {
   id: string;
   name: string;
   amount: number;
-  kind: CostKind;
+  basis: CostBasis;
 };
 
-type Currency = "IDR" | "USD" | "SGD" | "MYR" | "EUR";
+type CalculatorState = {
+  scenarioName: string;
+  template: TemplateKey;
+  items: CostItem[];
+  quantity: number;
+  unit: string;
+  sellingPrice: number;
+  targetMode: TargetMode;
+  targetRate: number;
+  feeRate: number;
+  currency: Currency;
+};
 
-const STORAGE_KEY = "costing:mvp:v1";
+const STORAGE_KEY = "costing:v2";
 
-const defaultItems: CostItem[] = [
-  { id: "material", name: "Material / supplies", amount: 2500000, kind: "variable" },
-  { id: "labor", name: "Direct labor", amount: 750000, kind: "variable" },
-  { id: "packaging", name: "Packaging", amount: 350000, kind: "variable" },
-  { id: "overhead", name: "Rent / overhead", amount: 500000, kind: "fixed" },
-];
+const templates: Record<
+  TemplateKey,
+  {
+    label: string;
+    scenarioName: string;
+    quantity: number;
+    unit: string;
+    items: Omit<CostItem, "id">[];
+  }
+> = {
+  product: {
+    label: "Product",
+    scenarioName: "Product costing",
+    quantity: 100,
+    unit: "pcs",
+    items: [
+      { name: "Raw materials", amount: 25000, basis: "unit" },
+      { name: "Packaging", amount: 3000, basis: "unit" },
+      { name: "Direct labor", amount: 250000, basis: "batch" },
+      { name: "Overhead allocation", amount: 500000, basis: "fixed" },
+    ],
+  },
+  fnb: {
+    label: "F&B",
+    scenarioName: "Menu costing",
+    quantity: 50,
+    unit: "portion",
+    items: [
+      { name: "Ingredients", amount: 18000, basis: "unit" },
+      { name: "Packaging", amount: 2500, basis: "unit" },
+      { name: "Prep labor", amount: 175000, basis: "batch" },
+      { name: "Utilities & overhead", amount: 225000, basis: "fixed" },
+    ],
+  },
+  service: {
+    label: "Service",
+    scenarioName: "Service costing",
+    quantity: 1,
+    unit: "service",
+    items: [
+      { name: "Direct labor", amount: 150000, basis: "unit" },
+      { name: "Consumables", amount: 25000, basis: "unit" },
+      { name: "Admin preparation", amount: 30000, basis: "batch" },
+      { name: "Overhead allocation", amount: 50000, basis: "fixed" },
+    ],
+  },
+  reseller: {
+    label: "Reseller",
+    scenarioName: "Reseller pricing",
+    quantity: 20,
+    unit: "pcs",
+    items: [
+      { name: "Purchase cost", amount: 125000, basis: "unit" },
+      { name: "Packaging", amount: 4000, basis: "unit" },
+      { name: "Inbound shipping", amount: 100000, basis: "batch" },
+      { name: "Operating allocation", amount: 150000, basis: "fixed" },
+    ],
+  },
+  project: {
+    label: "Project",
+    scenarioName: "Project costing",
+    quantity: 1,
+    unit: "project",
+    items: [
+      { name: "Project labor", amount: 2500000, basis: "batch" },
+      { name: "Materials / tools", amount: 750000, basis: "batch" },
+      { name: "Travel / logistics", amount: 350000, basis: "batch" },
+      { name: "Business overhead", amount: 500000, basis: "fixed" },
+    ],
+  },
+  custom: {
+    label: "Custom",
+    scenarioName: "Custom costing",
+    quantity: 1,
+    unit: "unit",
+    items: [
+      { name: "Primary cost", amount: 0, basis: "unit" },
+      { name: "Other cost", amount: 0, basis: "batch" },
+    ],
+  },
+};
 
 const currencyLocale: Record<Currency, string> = {
   IDR: "id-ID",
@@ -38,49 +121,38 @@ const currencyLocale: Record<Currency, string> = {
   EUR: "de-DE",
 };
 
-type CalculatorState = {
-  items: CostItem[];
-  quantity: number;
-  unit: string;
-  sellingPrice: number;
-  targetMargin: number;
-  currency: Currency;
-};
+function uid() {
+  return Math.random().toString(36).slice(2, 10);
+}
 
-const defaultState: CalculatorState = {
-  items: defaultItems,
-  quantity: 1000,
-  unit: "pcs",
-  sellingPrice: 6500,
-  targetMargin: 30,
-  currency: "IDR",
-};
+function templateState(key: TemplateKey): CalculatorState {
+  const preset = templates[key];
+  return {
+    scenarioName: preset.scenarioName,
+    template: key,
+    items: preset.items.map((item) => ({ ...item, id: uid() })),
+    quantity: preset.quantity,
+    unit: preset.unit,
+    sellingPrice: 0,
+    targetMode: "margin",
+    targetRate: 30,
+    feeRate: 0,
+    currency: "IDR",
+  };
+}
+
+const defaultState = templateState("product");
 
 function readInitialState(): CalculatorState {
   if (typeof window === "undefined") return defaultState;
-
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return defaultState;
-
-    const data = JSON.parse(raw);
-    const supportedCurrencies: Currency[] = ["IDR", "USD", "SGD", "MYR", "EUR"];
-
+    const data = JSON.parse(raw) as Partial<CalculatorState>;
     return {
-      items: Array.isArray(data.items) ? data.items : defaultItems,
-      quantity: typeof data.quantity === "number" ? data.quantity : defaultState.quantity,
-      unit: typeof data.unit === "string" ? data.unit : defaultState.unit,
-      sellingPrice:
-        typeof data.sellingPrice === "number"
-          ? data.sellingPrice
-          : defaultState.sellingPrice,
-      targetMargin:
-        typeof data.targetMargin === "number"
-          ? data.targetMargin
-          : defaultState.targetMargin,
-      currency: supportedCurrencies.includes(data.currency)
-        ? (data.currency as Currency)
-        : defaultState.currency,
+      ...defaultState,
+      ...data,
+      items: Array.isArray(data.items) && data.items.length ? data.items : defaultState.items,
     };
   } catch {
     return defaultState;
@@ -95,10 +167,6 @@ function useHydrated() {
   return useSyncExternalStore(subscribeToHydration, () => true, () => false);
 }
 
-function uid() {
-  return Math.random().toString(36).slice(2, 9);
-}
-
 function money(value: number, currency: Currency) {
   return new Intl.NumberFormat(currencyLocale[currency], {
     style: "currency",
@@ -107,115 +175,133 @@ function money(value: number, currency: Currency) {
   }).format(Number.isFinite(value) ? value : 0);
 }
 
-function formatNumber(value: number, maximumFractionDigits = 2) {
+function formatNumber(value: number, digits = 1) {
   return new Intl.NumberFormat("en-US", {
-    maximumFractionDigits,
+    maximumFractionDigits: digits,
   }).format(Number.isFinite(value) ? value : 0);
 }
 
 export default function Home() {
   const [initial] = useState<CalculatorState>(readInitialState);
-  const [items, setItems] = useState<CostItem[]>(initial.items);
-  const [quantity, setQuantity] = useState(initial.quantity);
-  const [unit, setUnit] = useState(initial.unit);
-  const [sellingPrice, setSellingPrice] = useState(initial.sellingPrice);
-  const [targetMargin, setTargetMargin] = useState(initial.targetMargin);
-  const [currency, setCurrency] = useState<Currency>(initial.currency);
+  const [state, setState] = useState<CalculatorState>(initial);
   const hydrated = useHydrated();
 
   useEffect(() => {
     if (!hydrated) return;
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({ items, quantity, unit, sellingPrice, targetMargin, currency }),
-    );
-  }, [hydrated, items, quantity, unit, sellingPrice, targetMargin, currency]);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }, [hydrated, state]);
 
   const metrics = useMemo(() => {
-    const safeQuantity = Math.max(quantity, 1);
-    const variableCost = items
-      .filter((item) => item.kind === "variable")
+    const qty = Math.max(state.quantity, 1);
+    const perUnitCost = state.items
+      .filter((item) => item.basis === "unit")
       .reduce((sum, item) => sum + Math.max(item.amount, 0), 0);
-    const fixedCost = items
-      .filter((item) => item.kind === "fixed")
+    const batchCost = state.items
+      .filter((item) => item.basis === "batch")
       .reduce((sum, item) => sum + Math.max(item.amount, 0), 0);
-    const totalCost = variableCost + fixedCost;
-    const totalCostPerUnit = totalCost / safeQuantity;
-    const variableCostPerUnit = variableCost / safeQuantity;
-    const suggestedPrice =
-      targetMargin >= 100
-        ? 0
-        : totalCostPerUnit / Math.max(1 - targetMargin / 100, 0.01);
-    const revenue = sellingPrice * safeQuantity;
-    const profit = revenue - totalCost;
-    const actualMargin = revenue > 0 ? (profit / revenue) * 100 : 0;
-    const markup = totalCost > 0 ? (profit / totalCost) * 100 : 0;
-    const contribution = sellingPrice - variableCostPerUnit;
+    const fixedCost = state.items
+      .filter((item) => item.basis === "fixed")
+      .reduce((sum, item) => sum + Math.max(item.amount, 0), 0);
+
+    const totalCost = perUnitCost * qty + batchCost + fixedCost;
+    const costPerUnit = totalCost / qty;
+    const fee = clamp(state.feeRate, 0, 90) / 100;
+    const target = clamp(state.targetRate, 0, 95) / 100;
+
+    const targetPrice =
+      state.targetMode === "margin"
+        ? costPerUnit / Math.max(1 - fee - target, 0.01)
+        : (costPerUnit * (1 + target)) / Math.max(1 - fee, 0.01);
+
+    const sellingPrice = Math.max(state.sellingPrice, 0);
+    const grossRevenue = sellingPrice * qty;
+    const feeAmount = grossRevenue * fee;
+    const netRevenue = grossRevenue - feeAmount;
+    const profit = netRevenue - totalCost;
+    const actualMargin = grossRevenue > 0 ? (profit / grossRevenue) * 100 : 0;
+    const actualMarkup = totalCost > 0 ? (profit / totalCost) * 100 : 0;
+    const contributionPerUnit = sellingPrice * (1 - fee) - perUnitCost;
+    const nonUnitCost = batchCost + fixedCost;
     const breakEvenUnits =
-      fixedCost > 0 && contribution > 0 ? Math.ceil(fixedCost / contribution) : 0;
+      contributionPerUnit > 0 && nonUnitCost > 0
+        ? Math.ceil(nonUnitCost / contributionPerUnit)
+        : 0;
 
     return {
-      variableCost,
+      perUnitCost,
+      batchCost,
       fixedCost,
       totalCost,
-      totalCostPerUnit,
-      variableCostPerUnit,
-      suggestedPrice,
-      revenue,
+      costPerUnit,
+      targetPrice,
+      grossRevenue,
+      feeAmount,
+      netRevenue,
       profit,
       actualMargin,
-      markup,
-      contribution,
+      actualMarkup,
+      contributionPerUnit,
       breakEvenUnits,
     };
-  }, [items, quantity, sellingPrice, targetMargin]);
+  }, [state]);
 
-  function updateItem(id: string, patch: Partial<CostItem>) {
-    setItems((current) =>
-      current.map((item) => (item.id === id ? { ...item, ...patch } : item)),
-    );
+  function patch(patchState: Partial<CalculatorState>) {
+    setState((current) => ({ ...current, ...patchState }));
   }
 
-  function removeItem(id: string) {
-    setItems((current) => current.filter((item) => item.id !== id));
+  function chooseTemplate(key: TemplateKey) {
+    const next = templateState(key);
+    next.currency = state.currency;
+    setState(next);
+  }
+
+  function updateItem(id: string, patchItem: Partial<CostItem>) {
+    patch({
+      items: state.items.map((item) =>
+        item.id === id ? { ...item, ...patchItem } : item,
+      ),
+    });
   }
 
   function addItem() {
-    setItems((current) => [
-      ...current,
-      { id: uid(), name: "New cost", amount: 0, kind: "variable" },
-    ]);
+    patch({
+      items: [
+        ...state.items,
+        { id: uid(), name: "New cost", amount: 0, basis: "unit" },
+      ],
+    });
+  }
+
+  function removeItem(id: string) {
+    if (state.items.length <= 1) return;
+    patch({ items: state.items.filter((item) => item.id !== id) });
   }
 
   function reset() {
-    setItems(defaultItems);
-    setQuantity(1000);
-    setUnit("pcs");
-    setSellingPrice(6500);
-    setTargetMargin(30);
-    setCurrency("IDR");
+    const next = templateState(state.template);
+    next.currency = state.currency;
+    setState(next);
   }
 
-  if (!hydrated) {
-    return <main className="site-shell" aria-hidden="true" />;
-  }
+  if (!hydrated) return <main className="app-shell" aria-hidden="true" />;
 
   return (
-    <main className="site-shell">
-      <header className="topbar">
-        <a className="brand" href="#" aria-label="Costing home">
-          <span className="brand-mark">C</span>
-          <span>
+    <main className="app-shell">
+      <header className="app-header">
+        <div className="brand-lockup">
+          <div className="brand-mark">C</div>
+          <div>
             <strong>Costing</strong>
-            <small>by Astakula</small>
-          </span>
-        </a>
+            <span>by Astakula</span>
+          </div>
+        </div>
 
-        <div className="topbar-actions">
+        <div className="header-actions">
           <ClaySelect
+            className="currency-select"
             aria-label="Currency"
-            value={currency}
-            onChange={(event) => setCurrency(event.target.value as Currency)}
+            value={state.currency}
+            onChange={(event) => patch({ currency: event.target.value as Currency })}
           >
             <option value="IDR">IDR</option>
             <option value="USD">USD</option>
@@ -223,81 +309,92 @@ export default function Home() {
             <option value="MYR">MYR</option>
             <option value="EUR">EUR</option>
           </ClaySelect>
-          <ClayButton variant="quiet" onClick={reset}>
-            Reset
-          </ClayButton>
+          <ClayButton variant="quiet" onClick={reset}>Reset</ClayButton>
         </div>
       </header>
 
-      <section className="hero">
-        <ClayBadge>Generic costing calculator</ClayBadge>
-        <h1>
-          Know what it costs.
-          <br />
-          <span>Price it right.</span>
-        </h1>
-        <p>
-          Calculate cost, unit economics, margin, markup, profit, and break-even
-          for products, services, projects, or any custom business model.
-        </p>
+      <section className="page-heading">
+        <div>
+          <p className="section-kicker">Cost · Price · Profit</p>
+          <h1>Costing workspace</h1>
+          <p>Build your cost structure, set a pricing target, and see the result instantly.</p>
+        </div>
+        <label className="scenario-field">
+          <span>Scenario</span>
+          <ClayInput
+            value={state.scenarioName}
+            onChange={(event) => patch({ scenarioName: event.target.value })}
+          />
+        </label>
       </section>
 
-      <section className="workspace">
-        <div className="workspace-main">
-          <ClayCard elevated>
-            <div className="section-heading">
+      <nav className="template-tabs" aria-label="Costing templates">
+        {(Object.keys(templates) as TemplateKey[]).map((key) => (
+          <button
+            key={key}
+            className={state.template === key ? "template-tab is-active" : "template-tab"}
+            onClick={() => chooseTemplate(key)}
+          >
+            {templates[key].label}
+          </button>
+        ))}
+      </nav>
+
+      <section className="workspace-v2">
+        <div className="workspace-column">
+          <ClayCard className="panel">
+            <div className="panel-heading">
               <div>
-                <p className="eyebrow">01 · Cost structure</p>
-                <h2>Your costs</h2>
+                <span className="step-label">01</span>
+                <div>
+                  <h2>Cost structure</h2>
+                  <p>Add every cost required to produce or deliver this output.</p>
+                </div>
               </div>
-              <ClayButton variant="secondary" onClick={addItem}>
-                + Add cost
-              </ClayButton>
+              <ClayButton variant="secondary" onClick={addItem}>+ Add cost</ClayButton>
             </div>
 
-            <div className="cost-table" role="group" aria-label="Cost items">
-              <div className="cost-row cost-row--head">
+            <div className="cost-editor">
+              <div className="cost-editor-head">
                 <span>Cost item</span>
-                <span>Type</span>
+                <span>Basis</span>
                 <span>Amount</span>
-                <span aria-hidden="true" />
+                <span />
               </div>
 
-              {items.map((item) => (
-                <div className="cost-row" key={item.id}>
+              {state.items.map((item) => (
+                <div className="cost-editor-row" key={item.id}>
                   <ClayInput
-                    aria-label={`Name for ${item.name}`}
                     value={item.name}
-                    onChange={(event) =>
-                      updateItem(item.id, { name: event.target.value })
-                    }
+                    aria-label="Cost item name"
+                    onChange={(event) => updateItem(item.id, { name: event.target.value })}
                   />
                   <ClaySelect
-                    aria-label={`Cost type for ${item.name}`}
-                    value={item.kind}
+                    value={item.basis}
+                    aria-label="Cost basis"
                     onChange={(event) =>
-                      updateItem(item.id, { kind: event.target.value as CostKind })
+                      updateItem(item.id, { basis: event.target.value as CostBasis })
                     }
                   >
-                    <option value="variable">Variable</option>
+                    <option value="unit">Per unit</option>
+                    <option value="batch">Per batch</option>
                     <option value="fixed">Fixed</option>
                   </ClaySelect>
                   <ClayInput
-                    aria-label={`Amount for ${item.name}`}
                     type="number"
-                    inputMode="decimal"
                     min="0"
+                    inputMode="decimal"
                     value={item.amount}
+                    aria-label="Cost amount"
                     onChange={(event) =>
-                      updateItem(item.id, { amount: toNumber(event.target.value) })
+                      updateItem(item.id, { amount: Math.max(0, toNumber(event.target.value)) })
                     }
                   />
                   <button
-                    className="remove-button"
+                    className="icon-button"
                     aria-label={`Remove ${item.name}`}
+                    disabled={state.items.length <= 1}
                     onClick={() => removeItem(item.id)}
-                    disabled={items.length === 1}
-                    title="Remove cost"
                   >
                     ×
                   </button>
@@ -305,155 +402,211 @@ export default function Home() {
               ))}
             </div>
 
-            <div className="cost-totals">
-              <span>
-                Variable <strong>{money(metrics.variableCost, currency)}</strong>
-              </span>
-              <span>
-                Fixed <strong>{money(metrics.fixedCost, currency)}</strong>
-              </span>
-              <span>
-                Total <strong>{money(metrics.totalCost, currency)}</strong>
-              </span>
+            <div className="cost-summary-strip">
+              <div>
+                <span>Per unit</span>
+                <strong>{money(metrics.perUnitCost, state.currency)}</strong>
+              </div>
+              <div>
+                <span>Per batch</span>
+                <strong>{money(metrics.batchCost, state.currency)}</strong>
+              </div>
+              <div>
+                <span>Fixed</span>
+                <strong>{money(metrics.fixedCost, state.currency)}</strong>
+              </div>
+              <div className="summary-total">
+                <span>Total cost</span>
+                <strong>{money(metrics.totalCost, state.currency)}</strong>
+              </div>
             </div>
           </ClayCard>
 
-          <ClayCard elevated>
-            <div className="section-heading">
+          <ClayCard className="panel">
+            <div className="panel-heading">
               <div>
-                <p className="eyebrow">02 · Output & pricing</p>
-                <h2>Production or delivery</h2>
+                <span className="step-label">02</span>
+                <div>
+                  <h2>Output & selling price</h2>
+                  <p>Define the output quantity and the price you plan to charge.</p>
+                </div>
               </div>
             </div>
 
-            <div className="field-grid field-grid--three">
-              <label className="field">
+            <div className="form-grid three-columns">
+              <label className="field-v2">
                 <span>Quantity</span>
                 <ClayInput
                   type="number"
                   min="1"
-                  value={quantity}
-                  onChange={(event) =>
-                    setQuantity(Math.max(1, toNumber(event.target.value)))
-                  }
+                  value={state.quantity}
+                  onChange={(event) => patch({ quantity: Math.max(1, toNumber(event.target.value)) })}
                 />
               </label>
-
-              <label className="field">
-                <span>Unit name</span>
+              <label className="field-v2">
+                <span>Unit</span>
                 <ClayInput
-                  value={unit}
-                  placeholder="pcs, hour, project..."
-                  onChange={(event) => setUnit(event.target.value)}
+                  value={state.unit}
+                  placeholder="pcs, portion, hour..."
+                  onChange={(event) => patch({ unit: event.target.value })}
                 />
               </label>
-
-              <label className="field">
-                <span>Selling price / {unit || "unit"}</span>
+              <label className="field-v2">
+                <span>Selling price / {state.unit || "unit"}</span>
                 <ClayInput
                   type="number"
                   min="0"
-                  value={sellingPrice}
-                  onChange={(event) => setSellingPrice(toNumber(event.target.value))}
+                  value={state.sellingPrice}
+                  onChange={(event) => patch({ sellingPrice: Math.max(0, toNumber(event.target.value)) })}
                 />
               </label>
             </div>
+          </ClayCard>
 
-            <div className="margin-control">
-              <div className="margin-copy">
-                <span>Target margin</span>
-                <strong>{targetMargin}%</strong>
+          <ClayCard className="panel">
+            <div className="panel-heading">
+              <div>
+                <span className="step-label">03</span>
+                <div>
+                  <h2>Pricing target</h2>
+                  <p>Choose how you want the recommended selling price to be calculated.</p>
+                </div>
               </div>
-              <input
-                className="clay-range"
-                type="range"
-                min="0"
-                max="80"
-                step="1"
-                value={targetMargin}
-                onChange={(event) =>
-                  setTargetMargin(clamp(toNumber(event.target.value), 0, 80))
-                }
-              />
-              <div className="range-labels">
-                <span>0%</span>
-                <span>40%</span>
-                <span>80%</span>
+            </div>
+
+            <div className="pricing-grid">
+              <div className="target-mode-control">
+                <span className="field-label">Target method</span>
+                <div className="segmented-control">
+                  <button
+                    className={state.targetMode === "margin" ? "is-active" : ""}
+                    onClick={() => patch({ targetMode: "margin" })}
+                  >
+                    Margin
+                  </button>
+                  <button
+                    className={state.targetMode === "markup" ? "is-active" : ""}
+                    onClick={() => patch({ targetMode: "markup" })}
+                  >
+                    Markup
+                  </button>
+                </div>
               </div>
+
+              <label className="field-v2">
+                <span>Target {state.targetMode}</span>
+                <div className="suffix-input">
+                  <ClayInput
+                    type="number"
+                    min="0"
+                    max="95"
+                    value={state.targetRate}
+                    onChange={(event) => patch({ targetRate: clamp(toNumber(event.target.value), 0, 95) })}
+                  />
+                  <span>%</span>
+                </div>
+              </label>
+
+              <label className="field-v2">
+                <span>Selling / platform fee</span>
+                <div className="suffix-input">
+                  <ClayInput
+                    type="number"
+                    min="0"
+                    max="90"
+                    value={state.feeRate}
+                    onChange={(event) => patch({ feeRate: clamp(toNumber(event.target.value), 0, 90) })}
+                  />
+                  <span>%</span>
+                </div>
+              </label>
             </div>
           </ClayCard>
         </div>
 
-        <aside className="workspace-side">
-          <ClayCard className="result-card result-card--primary" elevated>
-            <p className="eyebrow">Suggested price</p>
-            <div className="result-hero">
-              {money(metrics.suggestedPrice, currency)}
+        <aside className="summary-column">
+          <ClayCard className="summary-panel">
+            <div className="summary-header">
+              <span>Live summary</span>
+              <span className="live-pill">Live</span>
             </div>
-            <p>
-              per {unit || "unit"} for a {targetMargin}% target gross margin.
-            </p>
-            <div className="result-divider" />
-            <div className="result-line">
-              <span>Cost / {unit || "unit"}</span>
-              <strong>{money(metrics.totalCostPerUnit, currency)}</strong>
-            </div>
-            <div className="result-line">
-              <span>Variable cost / {unit || "unit"}</span>
-              <strong>{money(metrics.variableCostPerUnit, currency)}</strong>
-            </div>
-          </ClayCard>
 
-          <div className="metric-grid">
-            <ClayCard className="metric metric--mint">
-              <span>Revenue</span>
-              <strong>{money(metrics.revenue, currency)}</strong>
-            </ClayCard>
-            <ClayCard className="metric metric--peach">
-              <span>Profit</span>
-              <strong>{money(metrics.profit, currency)}</strong>
-            </ClayCard>
-            <ClayCard className="metric">
-              <span>Margin</span>
-              <strong>{formatNumber(metrics.actualMargin, 1)}%</strong>
-            </ClayCard>
-            <ClayCard className="metric">
-              <span>Markup</span>
-              <strong>{formatNumber(metrics.markup, 1)}%</strong>
-            </ClayCard>
-          </div>
+            <div className="summary-primary">
+              <span>Cost / {state.unit || "unit"}</span>
+              <strong>{money(metrics.costPerUnit, state.currency)}</strong>
+            </div>
 
-          <ClayCard elevated>
-            <div className="section-heading section-heading--compact">
+            <div className="recommended-price">
+              <span>Recommended price</span>
+              <strong>{money(metrics.targetPrice, state.currency)}</strong>
+              <small>
+                {state.targetRate}% target {state.targetMode}
+                {state.feeRate > 0 ? ` · ${state.feeRate}% fee included` : ""}
+              </small>
+              <ClayButton
+                variant="primary"
+                onClick={() => patch({ sellingPrice: Math.round(metrics.targetPrice) })}
+              >
+                Use recommended price
+              </ClayButton>
+            </div>
+
+            <div className="summary-divider" />
+
+            <div className="summary-list">
               <div>
-                <p className="eyebrow">Break-even</p>
-                <h2>
-                  {metrics.breakEvenUnits > 0
-                    ? `${formatNumber(metrics.breakEvenUnits, 0)} ${unit || "units"}`
-                    : "Not available"}
-                </h2>
+                <span>Gross revenue</span>
+                <strong>{money(metrics.grossRevenue, state.currency)}</strong>
+              </div>
+              <div>
+                <span>Selling fees</span>
+                <strong>-{money(metrics.feeAmount, state.currency)}</strong>
+              </div>
+              <div>
+                <span>Net revenue</span>
+                <strong>{money(metrics.netRevenue, state.currency)}</strong>
+              </div>
+              <div className={metrics.profit < 0 ? "negative" : "positive"}>
+                <span>Profit</span>
+                <strong>{money(metrics.profit, state.currency)}</strong>
               </div>
             </div>
-            <p className="supporting-copy">
-              {metrics.contribution > 0
-                ? `Contribution per ${unit || "unit"}: ${money(
-                    metrics.contribution,
-                    currency,
-                  )}.`
-                : "Selling price must be higher than variable cost per unit."}
-            </p>
+
+            <div className="metric-cards">
+              <div>
+                <span>Margin</span>
+                <strong>{formatNumber(metrics.actualMargin)}%</strong>
+              </div>
+              <div>
+                <span>Markup</span>
+                <strong>{formatNumber(metrics.actualMarkup)}%</strong>
+              </div>
+            </div>
+
+            <div className="break-even-box">
+              <div>
+                <span>Break-even</span>
+                <strong>
+                  {metrics.breakEvenUnits > 0
+                    ? `${formatNumber(metrics.breakEvenUnits, 0)} ${state.unit || "units"}`
+                    : "—"}
+                </strong>
+              </div>
+              <p>
+                {metrics.contributionPerUnit > 0
+                  ? `${money(metrics.contributionPerUnit, state.currency)} contribution per ${state.unit || "unit"}.`
+                  : "Set a selling price above the per-unit variable cost to calculate break-even."}
+              </p>
+            </div>
           </ClayCard>
 
-          <div className="privacy-note">
-            <span className="privacy-dot" />
-            Saved locally in this browser. No account or database required.
-          </div>
+          <p className="local-note">Saved automatically in this browser. No account required.</p>
         </aside>
       </section>
 
-      <footer>
-        <span>Costing</span>
-        <span>Cost · Price · Profit, clearly.</span>
+      <footer className="app-footer">
+        <span>Costing by Astakula</span>
+        <span>Generic business costing & pricing calculator.</span>
       </footer>
     </main>
   );
